@@ -64,13 +64,13 @@ The supplied files do not include caching-hook construction in `HookedRootModule
 The supplied benchmark checks cache structure and activation agreement; the supplied compatibility tests do not measure representation latency. The new `tests/unit/test_activation_cache_repr.py` imports the real class and checks this contract:
 
 ```python
-class ReprMustNotBeCalled:
+class ReprMustNotBeCalled(torch.Tensor):
     def __repr__(self):
         raise AssertionError("ActivationCache.__repr__ must not represent cached values")
 
-cache_dict = {
-    "hook_embed": ReprMustNotBeCalled(),
-    "blocks.0.hook_resid_pre": ReprMustNotBeCalled(),
+cache_dict: dict[str, torch.Tensor] = {
+    "hook_embed": torch.zeros(1).as_subclass(ReprMustNotBeCalled),
+    "blocks.0.hook_resid_pre": torch.zeros(1).as_subclass(ReprMustNotBeCalled),
 }
 cache = ActivationCache(cache_dict, model=None)
 representation = repr(cache)
@@ -78,7 +78,7 @@ for key in cache_dict:
     assert key in representation
 ```
 
-Review of the repository's pytest configuration found a problem with this test as written: `--jaxtyping-packages=transformer_lens,beartype.beartype` enables runtime type checking, but the sentinel values are not tensors as required by `ActivationCache.__init__`'s `Dict[str, torch.Tensor]` annotation. It is expected to fail during construction, before the repr assertion. A tensor-compatible sentinel (for example, a tensor subclass whose `__repr__` raises) should replace these plain objects. This test correction has not yet been made or executed.
+The repository's pytest configuration enables runtime type checking via `--jaxtyping-packages=transformer_lens,beartype.beartype`. The original plain-object sentinels violated the constructor's `Dict[str, torch.Tensor]` annotation. They have now been replaced with real tensor subclasses whose `__repr__` raises, preserving both checks while satisfying the tensor-value contract. The test imports `torch`; the excerpt above omits imports. Execution under the repository's normal pytest configuration remains pending.
 
 The existing `tests/acceptance/test_activation_cache.py` exercises model-backed logit attribution, residual decomposition, head/neuron results, and projection behavior. No production code or acceptance tests have changed on this branch, so these additions are not expected to alter that behavior. This is a source-based assessment, not a passing acceptance-test result.
 
