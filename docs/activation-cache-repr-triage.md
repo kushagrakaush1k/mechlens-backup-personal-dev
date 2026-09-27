@@ -4,7 +4,7 @@ Status: source investigation complete; checkout benchmark and regression-test ex
 
 ## What the issue reports
 
-As summarized by the reporter in this discussion, printing a large `ActivationCache` appears to hang a notebook. The suggested explanation is that representing the cache performs expensive work on its cached tensors.
+As summarized by the reporter in this discussion, printing a large `ActivationCache` appears to hang a notebook. The suggested explanation is that representing the cache performs expensive work on its cached tensors. According to the follow-up clarification in this discussion, the reporter proposed truncating the repr as the fix. This is the reporter's proposal, not a reproduced diagnosis or an agreed implementation change.
 
 The original [issue #1126](https://github.com/TransformerLensOrg/TransformerLens/issues/1126) could not be retrieved during this investigation. This is a paraphrase of the discussion, not a verified quotation from the issue. The precise failing expression, revision, environment, tensor device, key count, and stack trace remain unverified. In particular, “large” could mean many keys, large tensor payloads, or both.
 
@@ -77,6 +77,10 @@ representation = repr(cache)
 for key in cache_dict:
     assert key in representation
 ```
+
+Review of the repository's pytest configuration found a problem with this test as written: `--jaxtyping-packages=transformer_lens,beartype.beartype` enables runtime type checking, but the sentinel values are not tensors as required by `ActivationCache.__init__`'s `Dict[str, torch.Tensor]` annotation. It is expected to fail during construction, before the repr assertion. A tensor-compatible sentinel (for example, a tensor subclass whose `__repr__` raises) should replace these plain objects. This test correction has not yet been made or executed.
+
+The existing `tests/acceptance/test_activation_cache.py` exercises model-backed logit attribution, residual decomposition, head/neuron results, and projection behavior. No production code or acceptance tests have changed on this branch, so these additions are not expected to alter that behavior. This is a source-based assessment, not a passing acceptance-test result.
 
 The probe and test passed syntax checks, and the probe's CLI help was checked. Its benchmark could not start because the workspace lacks a complete checkout; Torch, IPython, and TransformerLens were also unavailable. The real regression test has **not** been run. No production source was modified.
 
