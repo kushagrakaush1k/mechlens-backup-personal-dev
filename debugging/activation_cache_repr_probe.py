@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the checkout's real ActivationCache.__repr__, without printing tensors.
+"""Measure the checkout's real ActivationCache repr and IPython formatter paths.
 
 Run from an environment containing this checkout's dependencies:
     python debugging/activation_cache_repr_probe.py
@@ -121,10 +121,14 @@ def main() -> None:
     if output == root / "docs/activation-cache-repr-triage.md":
         raise ValueError("Write a separate measurements file, then review it before updating triage")
     Cache, source_path, source_bytes, original_repr = load_checkout(root)
+    import IPython
     import torch
+    from IPython.core.formatters import DisplayFormatter
 
+    formatter = DisplayFormatter()
+    print(f"IPython: {IPython.__version__}; fresh default DisplayFormatter")
     print(f"PyTorch: {torch.__version__}; CPU float32; distinct storage per key")
-    print(f"Warmup: {args.warmup}; batches: {args.repeat}; repr calls/batch: {args.number}")
+    print(f"Warmup: {args.warmup}; batches: {args.repeat}; calls/batch: {args.number}")
     print("Times are microseconds per call; all batch samples are shown.")
 
     rows: list[str] = []
@@ -136,31 +140,43 @@ def main() -> None:
         values = {key: torch.ones(numel, dtype=torch.float32, device="cpu") for key in keys}
         cache = Cache(values, model=None)
         payload_mib = sum(t.numel() * t.element_size() for t in values.values()) / 2**20
-        for _ in range(args.warmup):
-            repr(cache)
-        timer = timeit.Timer(lambda: repr(cache))
-        samples = [seconds * 1e6 / args.number for seconds in timer.repeat(args.repeat, args.number)]
-        chars = len(repr(cache))
-        print(
-            f"{len(keys):7d} {numel:10d} {payload_mib:11.3f} {chars:10d} "
-            f"{min(samples):10.3f} {statistics.median(samples):10.3f} {max(samples):10.3f} "
-            + ",".join(f"{sample:.3f}" for sample in samples)
-        )
-        rows.append(
-            f"| {sweep} | {len(keys):,} | {numel:,} | {payload_mib:.6f} | {chars:,} | "
-            f"{min(samples):.3f} | {statistics.median(samples):.3f} | {max(samples):.3f} |"
-        )
-        raw_samples.append(
-            f"{sweep}, keys={len(keys)}, numel={numel}: "
-            + ", ".join(f"{sample:.6f}" for sample in samples)
-        )
+        bundle, _ = formatter.format(cache)
+        plain = bundle.get("text/plain")
+        if not isinstance(plain, str) or not all(key in plain for key in keys):
+            raise RuntimeError("IPython formatter did not return all cache keys in text/plain")
+        for path, operation, chars in [
+            ("repr", lambda: repr(cache), len(repr(cache))),
+            ("IPython formatter", lambda: formatter.format(cache), len(plain)),
+        ]:
+            for _ in range(args.warmup):
+                operation()
+            timer = timeit.Timer(operation)
+            samples = [
+                seconds * 1e6 / args.number
+                for seconds in timer.repeat(args.repeat, args.number)
+            ]
+            print(
+                f"{path:17s} {len(keys):7d} {numel:10d} {payload_mib:11.3f} {chars:10d} "
+                f"{min(samples):10.3f} {statistics.median(samples):10.3f} "
+                f"{max(samples):10.3f} "
+                + ",".join(f"{sample:.3f}" for sample in samples)
+            )
+            rows.append(
+                f"| {path} | {sweep} | {len(keys):,} | {numel:,} | {payload_mib:.6f} | "
+                f"{chars:,} | {min(samples):.3f} | {statistics.median(samples):.3f} | "
+                f"{max(samples):.3f} |"
+            )
+            raw_samples.append(
+                f"{path}, {sweep}, keys={len(keys)}, numel={numel}: "
+                + ", ".join(f"{sample:.6f}" for sample in samples)
+            )
         # Locals, including timer's cache closure, are released on return.
 
     def keys_for(count: int) -> tuple[str, ...]:
         # Fixed-width keys keep per-key string length constant across sweeps.
         return tuple(f"blocks.{i:08d}.hook_resid_pre" for i in range(count))
 
-    header = "   keys      numel payload_MiB repr_chars     min_us  median_us     max_us samples_us"
+    header = "path                 keys      numel payload_MiB repr_chars     min_us  median_us     max_us samples_us"
     fixed_keys = keys_for(args.fixed_keys)
     print("\nA: identical keys; increasing elements per tensor")
     print(header)
@@ -189,7 +205,7 @@ def main() -> None:
         f"Completed (UTC): {datetime.now(timezone.utc).isoformat()}",
         f"Commit: {git_info('rev-parse', 'HEAD')}",
         f"Python: {sys.version.split()[0]} ({sys.executable})",
-        f"PyTorch: {torch.__version__}",
+        f"PyTorch: {torch.__version__}; IPython: {IPython.__version__}",
         f"OS: {platform.platform()}; CPU: {platform.processor() or platform.machine()}",
         f"Verified source: {source_path}",
         f"Source SHA-256: {hashlib.sha256(source_bytes).hexdigest()}",
@@ -199,12 +215,14 @@ def main() -> None:
         f"batches={args.repeat}, calls/batch={args.number}.",
         "Timings are microseconds per call, summarized across batch averages. "
         "Imports, allocation, warmups, printing, and file output are excluded. "
-        "This does not measure notebook rendering or GPU behavior.",
+        "Formatter timings use a fresh default DisplayFormatter, including MIME-bundle "
+        "construction; no reporter-specific formatters, notebook transport, browser "
+        "rendering, or GPU behavior are measured.",
         "Pytest and acceptance-test results: PENDING (not run by this probe).",
         "",
-        "| Sweep | Keys | Elements per tensor | Payload MiB | Repr characters | "
+        "| Path | Sweep | Keys | Elements per tensor | Payload MiB | Text characters | "
         "Min µs/call | Median µs/call | Max µs/call |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         *rows,
         "",
         "## Raw batch averages (µs/call)",
@@ -240,7 +258,6 @@ def main() -> None:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
     print(f"Saved measurements: {output}")
-
 
 
 if __name__ == "__main__":

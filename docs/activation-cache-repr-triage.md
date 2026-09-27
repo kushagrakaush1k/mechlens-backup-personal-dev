@@ -64,21 +64,44 @@ The supplied files do not include caching-hook construction in `HookedRootModule
 The supplied benchmark checks cache structure and activation agreement; the supplied compatibility tests do not measure representation latency. The new `tests/unit/test_activation_cache_repr.py` imports the real class and checks this contract:
 
 ```python
-class ReprMustNotBeCalled(torch.Tensor):
-    def __repr__(self):
-        raise AssertionError("ActivationCache.__repr__ must not represent cached values")
+import torch
+from IPython.core.formatters import DisplayFormatter
 
-cache_dict: dict[str, torch.Tensor] = {
-    "hook_embed": torch.zeros(1).as_subclass(ReprMustNotBeCalled),
-    "blocks.0.hook_resid_pre": torch.zeros(1).as_subclass(ReprMustNotBeCalled),
-}
-cache = ActivationCache(cache_dict, model=None)
-representation = repr(cache)
-for key in cache_dict:
-    assert key in representation
+from transformer_lens.ActivationCache import ActivationCache
+
+
+def test_repr_includes_keys_without_representing_values():
+    repr_calls = 0
+
+    class ReprMustNotBeCalled(torch.Tensor):
+        def __repr__(self):
+            nonlocal repr_calls
+            repr_calls += 1
+            raise AssertionError("ActivationCache.__repr__ must not represent cached values")
+
+    cache_dict: dict[str, torch.Tensor] = {
+        "hook_embed": torch.zeros(1).as_subclass(ReprMustNotBeCalled),
+        "blocks.0.hook_resid_pre": torch.zeros(1).as_subclass(ReprMustNotBeCalled),
+    }
+    cache = ActivationCache(cache_dict, model=None)
+
+    representation = repr(cache)
+
+    for key in cache_dict:
+        assert key in representation
+
+    assert repr_calls == 0
+
+    bundle, _ = DisplayFormatter().format(cache)
+
+    # IPython can catch formatter exceptions, so check calls as well as output.
+    assert repr_calls == 0
+    assert "text/plain" in bundle
+    for key in cache_dict:
+        assert key in bundle["text/plain"]
 ```
 
-The repository's pytest configuration enables runtime type checking via `--jaxtyping-packages=transformer_lens,beartype.beartype`. The original plain-object sentinels violated the constructor's `Dict[str, torch.Tensor]` annotation. They have now been replaced with real tensor subclasses whose `__repr__` raises, preserving both checks while satisfying the tensor-value contract. The test imports `torch`; the excerpt above omits imports. Execution under the repository's normal pytest configuration remains pending.
+The repository's pytest configuration enables runtime type checking via `--jaxtyping-packages=transformer_lens,beartype.beartype`. The original plain-object sentinels violated the constructor's `Dict[str, torch.Tensor]` annotation. They have now been replaced with real tensor subclasses whose `__repr__` raises, preserving both checks while satisfying the tensor-value contract. The same test also formats the cache with a fresh `IPython.core.formatters.DisplayFormatter`, checks every key in `text/plain`, and checks an explicit sentinel call counter because IPython may catch formatter exceptions. Execution under the repository's normal pytest configuration remains pending.
 
 The existing `tests/acceptance/test_activation_cache.py` exercises model-backed logit attribution, residual decomposition, head/neuron results, and projection behavior. No production code or acceptance tests have changed on this branch, so these additions are not expected to alter that behavior. This is a source-based assessment, not a passing acceptance-test result.
 
@@ -95,27 +118,36 @@ python debugging/activation_cache_repr_probe.py
 python -m pytest tests/unit/test_activation_cache_repr.py
 ```
 
-After a successful run, the probe also saves `docs/activation-cache-repr-measurements.md` in the selected checkout. It contains a table matching the columns below, all batch samples, source provenance, environment details, and Git commit/status. Copy the reviewed table and run details into this section; the triage document is not rewritten automatically. Use `--output docs/another-run.md` to retain separate runs. The default results file is replaced atomically only after a successful run; if a later run fails, any previous file remains and its timestamp identifies the earlier run. No results file has been generated yet.
+After a successful run, the probe also saves `docs/activation-cache-repr-measurements.md` in the selected checkout. It contains a table distinguishing the `repr` and `IPython formatter` paths, all batch samples, source provenance, environment details, and Git commit/status. Copy the reviewed table and run details into this section; the triage document is not rewritten automatically. Use `--output docs/another-run.md` to retain separate runs. The default results file is replaced atomically only after a successful run; if a later run fails, any previous file remains and its timestamp identifies the earlier run. No results file has been generated yet.
 
 The probe imports the real class after putting the repository root first on `sys.path`. It checks module, module-spec, class, and method source paths against `transformer_lens/ActivationCache.py`, then compares the imported method's code with code compiled from that file. Compilation is for comparison only; extracted code is never executed as a substitute. It prints the source hash and method and checks for source/method changes after measurement. These checks establish correspondence to the local file, not to an independently authenticated upstream commit.
 
-Defaults: CPU float32 tensors with distinct initialized storage; 20 warmup calls; 9 timed batches of 100 `repr()` calls each. Importing, allocation, warmups, and output are outside timing. Each batch duration is divided by its call count; the table records minimum, median, and maximum of those per-call batch averages. The probe also prints all batch samples. `timeit` disables cyclic garbage collection during timing by default. These measurements exclude notebook rendering and GPU behavior.
+Defaults: CPU float32 tensors with distinct initialized storage; 20 warmup calls; 9 timed batches of 100 calls each, separately for `repr(cache)` and `DisplayFormatter.format(cache)`. Importing, allocation, warmups, and output are outside timing. Each batch duration is divided by its call count; the table records minimum, median, and maximum of those per-call batch averages. The probe also prints all batch samples. `timeit` disables cyclic garbage collection during timing by default. The formatter is constructed outside timing with fresh default settings; full MIME-bundle construction is timed. Output validation is outside timing. This covers IPython formatting, not the reporter's custom formatters, notebook transport, browser rendering, or GPU behavior. IPython is required (included in the repo's default `jupyter` dependency group); its version is recorded in the results.
 
 The numeric key counts and tensor sizes below are **planned inputs**, not observations. Sweep A reuses identical keys; sweep B uses fixed-width key names and fixed tensor size.
 
-| Sweep | Keys | Elements per tensor | Payload MiB | Repr characters | Min µs/call | Median µs/call | Max µs/call |
-| --- | ---: | ---: | --- | --- | --- | --- | --- |
-| A: tensor size | 64 | 1 | PENDING | PENDING | PENDING | PENDING | PENDING |
-| A: tensor size | 64 | 1,024 | PENDING | PENDING | PENDING | PENDING | PENDING |
-| A: tensor size | 64 | 65,536 | PENDING | PENDING | PENDING | PENDING | PENDING |
-| A: tensor size | 64 | 262,144 | PENDING | PENDING | PENDING | PENDING | PENDING |
-| B: key count | 16 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
-| B: key count | 64 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
-| B: key count | 256 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
-| B: key count | 1,024 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
-| B: key count | 4,096 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| Path | Sweep | Keys | Elements per tensor | Payload MiB | Text characters | Min µs/call | Median µs/call | Max µs/call |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| repr | A: tensor size | 64 | 1 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| IPython formatter | A: tensor size | 64 | 1 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| repr | A: tensor size | 64 | 1,024 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| IPython formatter | A: tensor size | 64 | 1,024 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| repr | A: tensor size | 64 | 65,536 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| IPython formatter | A: tensor size | 64 | 65,536 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| repr | A: tensor size | 64 | 262,144 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| IPython formatter | A: tensor size | 64 | 262,144 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| repr | B: key count | 16 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| IPython formatter | B: key count | 16 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| repr | B: key count | 64 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| IPython formatter | B: key count | 64 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| repr | B: key count | 256 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| IPython formatter | B: key count | 256 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| repr | B: key count | 1,024 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| IPython formatter | B: key count | 1,024 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| repr | B: key count | 4,096 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
+| IPython formatter | B: key count | 4,096 | 16 | PENDING | PENDING | PENDING | PENDING | PENDING |
 
-Record alongside the results: commit and working-tree changes **PENDING**; source path/hash **PENDING**; Python/PyTorch versions **PENDING**; OS/CPU **PENDING**; raw probe output **PENDING**; pytest result **PENDING**. For the reported notebook reproduction, also record notebook/IPython versions, frontend, device, and exact expression.
+Record alongside the results: commit and working-tree changes **PENDING**; source path/hash **PENDING**; Python/PyTorch/IPython versions **PENDING**; OS/CPU **PENDING**; raw probe output **PENDING**; pytest result **PENDING**. For the reported notebook reproduction, also record notebook/IPython versions, frontend, device, and exact expression.
 
 ## Diagnosis
 
