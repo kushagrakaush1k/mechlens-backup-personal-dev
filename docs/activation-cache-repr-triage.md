@@ -117,6 +117,8 @@ Record alongside the results: commit and working-tree changes **PENDING**; sourc
 
 ## Diagnosis
 
+**No defect in the current `ActivationCache.__repr__` has been reproduced in this checkout.** The evidence so far consists of source inspection and isolated structural checks; the verified-import benchmark, normal-config regression test, and reported notebook hang have not been reproduced or run to completion. This is an unconfirmed report, not proof that the implementation is defect-free. There is currently no reproduced failure that justifies adding truncation, so `ActivationCache.py` remains unchanged.
+
 The reviewed implementation does not support the explanation that ordinary `repr(cache)` expands cached tensors. Its direct work depends on key count and key-string length, not tensor payload size. We expect approximately stable timings in sweep A and increasing work/output in sweep B; these are predictions, not measured conclusions.
 
 The key list is unbounded, so sufficiently many keys can still make string construction or notebook output costly. Representing the raw dictionary or an individual tensor is a different operation. Hook registration can also invoke representation before any explicit display, but this checkout already guards ordinary partial arguments. None of these candidate mechanisms has been established as the cause of #1126.
