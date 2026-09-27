@@ -1,16 +1,16 @@
 # ActivationCache representation: issue #1126 triage
 
-Status: source investigation complete; checkout benchmark and regression-test execution pending. No production behavior change proposed yet.
+Status: initial source review complete; checkout benchmark and regression-test execution pending. No production behavior change proposed yet.
 
 ## What the issue reports
 
-As summarized by the reporter in this discussion, printing a large `ActivationCache` appears to hang a notebook. The suggested explanation is that representing the cache performs expensive work on its cached tensors. According to the follow-up clarification in this discussion, the reporter proposed truncating the repr as the fix. This is the reporter's proposal, not a reproduced diagnosis or an agreed implementation change.
+According to the issue summary provided in this discussion, printing a large `ActivationCache` appears to hang a notebook. According to the follow-up clarification in this discussion, the reporter proposed truncating the repr as the fix. This is the reporter's proposal, not a reproduced diagnosis or an agreed implementation change.
 
 The original [issue #1126](https://github.com/TransformerLensOrg/TransformerLens/issues/1126) could not be retrieved during this investigation. This is a paraphrase of the discussion, not a verified quotation from the issue. The precise failing expression, revision, environment, tensor device, key count, and stack trace remain unverified. In particular, “large” could mean many keys, large tensor payloads, or both.
 
 ## What we actually verified in the repo
 
-The source review used the supplied copies of `ActivationCache.py`, `hook_points.py`, the activation-cache benchmarks, compatibility tests, and `pyproject.toml`. A complete importable checkout was not available in the investigation environment.
+The initial source review used the supplied copies of `ActivationCache.py`, `hook_points.py`, the activation-cache benchmarks, compatibility tests, and `pyproject.toml`. Subsequent read-only inspection on the GitHub branch included the current repr implementation, pytest configuration, `tests/conftest.py`, the acceptance test, and relevant component hook definitions. This expanded the source evidence but did not provide a complete importable local checkout. Caching-hook construction and the reporter's notebook environment have not been fully traced.
 
 ### The cache wrapper formats keys only
 
@@ -46,6 +46,8 @@ else:
     full_hook.__name__ = hook.__repr__()
 ```
 
+The comment above records developer intent; it is not a performance measurement from this investigation.
+
 The backward wrapper uses the same partial guard:
 
 ```python
@@ -57,11 +59,11 @@ else:
 
 Ordinary `repr(partial(fn, cache=populated_dict))` can recursively represent the bound dictionary's values. An isolated sentinel check confirmed that distinction and that the uploaded guarded naming branch avoids those values. The current guard still represents `hook.func`; a custom callable can have an expensive representation.
 
-The supplied files do not include caching-hook construction in `HookedRootModule` or the bridge. They therefore do not establish which object is bound, whether it is populated at registration, or whether this path caused the reported hang. `HookPoint.__repr__` itself reports only its name and hook counts.
+Caching-hook construction in `HookedRootModule` and the bridge was not inspected during this investigation. We therefore have not established which object is bound, whether it is populated at registration, whether representing it is slow, or whether this path caused the reported hang. `HookPoint.__repr__` itself reports only its name and hook counts.
 
 ### Coverage and execution limits
 
-The supplied benchmark checks cache structure and activation agreement; the supplied compatibility tests do not measure representation latency. The new `tests/unit/test_activation_cache_repr.py` imports the real class and checks this contract:
+The supplied benchmark checks cache structure and activation agreement; the supplied compatibility tests do not measure representation latency. The new `tests/unit/test_activation_cache_repr.py` is written to import the real class and check this contract; it has not been executed:
 
 ```python
 import torch
@@ -101,7 +103,7 @@ def test_repr_includes_keys_without_representing_values():
         assert key in bundle["text/plain"]
 ```
 
-The repository's pytest configuration enables runtime type checking via `--jaxtyping-packages=transformer_lens,beartype.beartype`. The original plain-object sentinels violated the constructor's `Dict[str, torch.Tensor]` annotation. They have now been replaced with real tensor subclasses whose `__repr__` raises, preserving both checks while satisfying the tensor-value contract. The same test also formats the cache with a fresh `IPython.core.formatters.DisplayFormatter`, checks every key in `text/plain`, and checks an explicit sentinel call counter because IPython may catch formatter exceptions. Execution under the repository's normal pytest configuration remains pending.
+The repository's pytest configuration enables runtime type checking via `--jaxtyping-packages=transformer_lens,beartype.beartype`. The original plain-object sentinels violated the constructor's `Dict[str, torch.Tensor]` annotation. They have now been replaced with tensor subclasses whose `__repr__` raises, while preserving both assertions. The replacement values are tensor subclasses, but runtime compatibility with the configured pytest instrumentation remains unverified. The same test is written to format the cache with a fresh `IPython.core.formatters.DisplayFormatter`, check every key in `text/plain`, and check an explicit sentinel call counter because IPython may catch formatter exceptions. Execution under the repository's normal pytest configuration remains pending.
 
 The existing `tests/acceptance/test_activation_cache.py` exercises model-backed logit attribution, residual decomposition, head/neuron results, and projection behavior. No production code or acceptance tests have changed on this branch, so these additions are not expected to alter that behavior. This is a source-based assessment, not a passing acceptance-test result.
 
@@ -118,9 +120,9 @@ python debugging/activation_cache_repr_probe.py
 python -m pytest tests/unit/test_activation_cache_repr.py
 ```
 
-After a successful run, the probe also saves `docs/activation-cache-repr-measurements.md` in the selected checkout. It contains a table distinguishing the `repr` and `IPython formatter` paths, all batch samples, source provenance, environment details, and Git commit/status. Copy the reviewed table and run details into this section; the triage document is not rewritten automatically. Use `--output docs/another-run.md` to retain separate runs. The default results file is replaced atomically only after a successful run; if a later run fails, any previous file remains and its timestamp identifies the earlier run. No results file has been generated yet.
+The probe is implemented to save `docs/activation-cache-repr-measurements.md` in the selected checkout after a successful run. The generated report is designed to contain a table distinguishing the `repr` and `IPython formatter` paths, all batch samples, source provenance, environment details, and Git commit/status. Copy the reviewed table and run details into this section; the triage document is not rewritten automatically. Use `--output docs/another-run.md` to retain separate runs. The default results file is replaced atomically only after a successful run; if a later run fails, any previous file remains and its timestamp identifies the earlier run. No results file has been generated yet. The successful execution path, including source verification, formatting, and file generation, has been reviewed in code but not verified end-to-end.
 
-The probe imports the real class after putting the repository root first on `sys.path`. It checks module, module-spec, class, and method source paths against `transformer_lens/ActivationCache.py`, then compares the imported method's code with code compiled from that file. Compilation is for comparison only; extracted code is never executed as a substitute. It prints the source hash and method and checks for source/method changes after measurement. These checks establish correspondence to the local file, not to an independently authenticated upstream commit.
+The probe is written to import the real class after putting the repository root first on `sys.path`. It checks module, module-spec, class, and method source paths against `transformer_lens/ActivationCache.py`, then compares the imported method's code with code compiled from that file. Compilation is for comparison only; extracted code is never executed as a substitute. It prints the source hash and method and checks for source/method changes after measurement. These checks are intended to establish correspondence to the local file, not to an independently authenticated upstream commit; they have not completed successfully in this environment.
 
 Defaults: CPU float32 tensors with distinct initialized storage; 20 warmup calls; 9 timed batches of 100 calls each, separately for `repr(cache)` and `DisplayFormatter.format(cache)`. Importing, allocation, warmups, and output are outside timing. Each batch duration is divided by its call count; the table records minimum, median, and maximum of those per-call batch averages. The probe also prints all batch samples. `timeit` disables cyclic garbage collection during timing by default. The formatter is constructed outside timing with fresh default settings; full MIME-bundle construction is timed. Output validation is outside timing. This covers IPython formatting, not the reporter's custom formatters, notebook transport, browser rendering, or GPU behavior. IPython is required (included in the repo's default `jupyter` dependency group); its version is recorded in the results.
 
@@ -153,7 +155,7 @@ Record alongside the results: commit and working-tree changes **PENDING**; sourc
 
 **No defect in the current `ActivationCache.__repr__` has been reproduced in this checkout.** The evidence so far consists of source inspection and isolated structural checks; the verified-import benchmark, normal-config regression test, and reported notebook hang have not been reproduced or run to completion. This is an unconfirmed report, not proof that the implementation is defect-free. There is currently no reproduced failure that justifies adding truncation, so `ActivationCache.py` remains unchanged.
 
-The reviewed implementation does not support the explanation that ordinary `repr(cache)` expands cached tensors. Its direct work depends on key count and key-string length, not tensor payload size. We expect approximately stable timings in sweep A and increasing work/output in sweep B; these are predictions, not measured conclusions.
+One hypothesis considered during triage was that ordinary `repr(cache)` expands cached tensors. This was our interpretation of a possible mechanism, not a verified claim from the reporter. The reviewed implementation does not support that hypothesis. Its direct work depends on key count and key-string length, not tensor payload size. We expect approximately stable timings in sweep A and increasing work/output in sweep B; these are predictions, not measured conclusions.
 
 The key list is unbounded, so sufficiently many keys can still make string construction or notebook output costly. Representing the raw dictionary or an individual tensor is a different operation. Hook registration can also invoke representation before any explicit display, but this checkout already guards ordinary partial arguments. None of these candidate mechanisms has been established as the cause of #1126.
 
