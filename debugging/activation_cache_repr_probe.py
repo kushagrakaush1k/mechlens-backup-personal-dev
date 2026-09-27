@@ -17,10 +17,15 @@ import argparse
 import hashlib
 import importlib
 import inspect
+import os
+import platform
 import statistics
+import subprocess
 import sys
+import tempfile
 import timeit
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -34,6 +39,12 @@ def positive_int(value: str) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("docs/activation-cache-repr-measurements.md"),
+        help="Markdown results path, relative to repo root; replaced after a successful run",
+    )
     parser.add_argument("--fixed-keys", type=positive_int, default=64)
     parser.add_argument("--tensor-sizes", type=positive_int, nargs="+", default=[1, 1024, 65536, 262144])
     parser.add_argument("--key-counts", type=positive_int, nargs="+", default=[16, 64, 256, 1024, 4096])
@@ -103,14 +114,23 @@ def load_checkout(repo_root: Path):
 
 def main() -> None:
     args = parse_args()
-    Cache, source_path, source_bytes, original_repr = load_checkout(args.repo_root)
+    root = args.repo_root.resolve()
+    output = (root / args.output).resolve()
+    if output.suffix != ".md":
+        raise ValueError("--output must be a Markdown (.md) file")
+    if output == root / "docs/activation-cache-repr-triage.md":
+        raise ValueError("Write a separate measurements file, then review it before updating triage")
+    Cache, source_path, source_bytes, original_repr = load_checkout(root)
     import torch
 
     print(f"PyTorch: {torch.__version__}; CPU float32; distinct storage per key")
     print(f"Warmup: {args.warmup}; batches: {args.repeat}; repr calls/batch: {args.number}")
     print("Times are microseconds per call; all batch samples are shown.")
 
-    def measure(keys: tuple[str, ...], numel: int) -> None:
+    rows: list[str] = []
+    raw_samples: list[str] = []
+
+    def measure(sweep: str, keys: tuple[str, ...], numel: int) -> None:
         # Real, independently allocated tensors, not expand() views or shared
         # references. Allocation/initialization is deliberately not timed.
         values = {key: torch.ones(numel, dtype=torch.float32, device="cpu") for key in keys}
@@ -126,6 +146,14 @@ def main() -> None:
             f"{min(samples):10.3f} {statistics.median(samples):10.3f} {max(samples):10.3f} "
             + ",".join(f"{sample:.3f}" for sample in samples)
         )
+        rows.append(
+            f"| {sweep} | {len(keys):,} | {numel:,} | {payload_mib:.6f} | {chars:,} | "
+            f"{min(samples):.3f} | {statistics.median(samples):.3f} | {max(samples):.3f} |"
+        )
+        raw_samples.append(
+            f"{sweep}, keys={len(keys)}, numel={numel}: "
+            + ", ".join(f"{sample:.6f}" for sample in samples)
+        )
         # Locals, including timer's cache closure, are released on return.
 
     def keys_for(count: int) -> tuple[str, ...]:
@@ -137,15 +165,82 @@ def main() -> None:
     print("\nA: identical keys; increasing elements per tensor")
     print(header)
     for numel in sorted(set(args.tensor_sizes)):
-        measure(fixed_keys, numel)
+        measure("A: tensor size", fixed_keys, numel)
     print("\nB: increasing key count; fixed elements per tensor")
     print(header)
     for count in sorted(set(args.key_counts)):
-        measure(keys_for(count), args.fixed_numel)
+        measure("B: key count", keys_for(count), args.fixed_numel)
 
     if source_path.read_bytes() != source_bytes or Cache.__repr__ is not original_repr:
         raise RuntimeError("Source or __repr__ changed during measurement; discard these results")
     print("\nCompleted; source and imported __repr__ remained unchanged.")
+
+    def git_info(*git_args: str) -> str:
+        try:
+            return subprocess.check_output(
+                ["git", "-C", str(root), *git_args], text=True, stderr=subprocess.DEVNULL
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return "UNAVAILABLE"
+
+    report = [
+        "# ActivationCache repr measurements",
+        "",
+        f"Completed (UTC): {datetime.now(timezone.utc).isoformat()}",
+        f"Commit: {git_info('rev-parse', 'HEAD')}",
+        f"Python: {sys.version.split()[0]} ({sys.executable})",
+        f"PyTorch: {torch.__version__}",
+        f"OS: {platform.platform()}; CPU: {platform.processor() or platform.machine()}",
+        f"Verified source: {source_path}",
+        f"Source SHA-256: {hashlib.sha256(source_bytes).hexdigest()}",
+        "",
+        "Imported repr matched the checkout source; source and method stayed unchanged.",
+        f"CPU float32, distinct storage; warmup={args.warmup}, "
+        f"batches={args.repeat}, calls/batch={args.number}.",
+        "Timings are microseconds per call, summarized across batch averages. "
+        "Imports, allocation, warmups, printing, and file output are excluded. "
+        "This does not measure notebook rendering or GPU behavior.",
+        "Pytest and acceptance-test results: PENDING (not run by this probe).",
+        "",
+        "| Sweep | Keys | Elements per tensor | Payload MiB | Repr characters | "
+        "Min µs/call | Median µs/call | Max µs/call |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        *rows,
+        "",
+        "## Raw batch averages (µs/call)",
+        "",
+        "```text",
+        *raw_samples,
+        "```",
+        "",
+        "## Working-tree status before saving results",
+        "",
+        "```text",
+        git_info("status", "--short") or "(clean)",
+        "```",
+        "",
+        "## Verified repr source",
+        "",
+        "```python",
+        inspect.getsource(original_repr).strip(),
+        "```",
+        "",
+    ]
+    # Replace atomically so a failed write cannot leave a partial results file.
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=output.parent, delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write("\n".join(report))
+        os.replace(temporary, output)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    print(f"Saved measurements: {output}")
+
 
 
 if __name__ == "__main__":
